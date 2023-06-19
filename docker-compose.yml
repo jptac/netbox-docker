@@ -1,13 +1,20 @@
-version: '3.4'
+version: '3.7'
 services:
   netbox: &netbox
+    restart: always
     image: docker.io/netboxcommunity/netbox:${VERSION-v3.5-2.6.1}
     depends_on:
-    - postgres
-    - redis
-    - redis-cache
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+      redis-cache:
+        condition: service_started
+      tailscale:
+        condition: service_healthy
     env_file: env/netbox.env
     user: 'unit:root'
+    network_mode: service:tailscale
     healthcheck:
       start_period: 60s
       timeout: 3s
@@ -18,8 +25,10 @@ services:
     - netbox-media-files:/opt/netbox/netbox/media:z,rw
     - netbox-reports-files:/opt/netbox/netbox/reports:z,rw
     - netbox-scripts-files:/opt/netbox/netbox/scripts:z,rw
+
   netbox-worker:
     <<: *netbox
+    restart: always
     depends_on:
       netbox:
         condition: service_healthy
@@ -34,6 +43,7 @@ services:
       test: "ps -aux | grep -v grep | grep -q rqworker || exit 1"
   netbox-housekeeping:
     <<: *netbox
+    restart: always
     depends_on:
       netbox:
         condition: service_healthy
@@ -47,31 +57,66 @@ services:
 
   # postgres
   postgres:
+    restart: always
     image: docker.io/postgres:15-alpine
     env_file: env/postgres.env
+    networks:
+      - backend
     volumes:
     - netbox-postgres-data:/var/lib/postgresql/data
-
+    healthcheck:
+      test: /usr/bin/pg_isready
+      interval: 5s
+      timeout: 10s
+      retries: 120
   # redis
   redis:
+    restart: always
     image: docker.io/redis:7-alpine
     command:
     - sh
     - -c # this is to evaluate the $REDIS_PASSWORD from the env
     - redis-server --appendonly yes --requirepass $$REDIS_PASSWORD ## $$ because of docker-compose
     env_file: env/redis.env
+    networks:
+      - backend
+
     volumes:
     - netbox-redis-data:/data
   redis-cache:
+    restart: always
     image: docker.io/redis:7-alpine
     command:
     - sh
     - -c # this is to evaluate the $REDIS_PASSWORD from the env
     - redis-server --requirepass $$REDIS_PASSWORD ## $$ because of docker-compose
     env_file: env/redis-cache.env
+    networks:
+      - backend
     volumes:
     - netbox-redis-cache-data:/data
-
+  tailscale:
+    privileged: true
+    hostname: tailscale
+    container_name: tailscale
+    image: tailscale/tailscale:latest
+    volumes:
+      - "./tailscale_var_lib:/var/lib"
+      - "/dev/net/tun:/dev/net/tun"
+    devices:
+      - /dev/net/tun
+    networks:
+      - backend
+    cap_add:
+      - net_admin
+      - sys_module
+      - net_raw
+    command: tailscaled && tailscale up --accept-dns=false
+    healthcheck:
+      test: ["CMD-SHELL", "tailscale status"]
+      interval: 60s
+      timeout: 5s
+      retries: 100
 volumes:
   netbox-media-files:
     driver: local
@@ -85,3 +130,7 @@ volumes:
     driver: local
   netbox-scripts-files:
     driver: local
+
+networks:
+  backend:
+    driver: bridge
